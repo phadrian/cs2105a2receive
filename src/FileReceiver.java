@@ -41,6 +41,10 @@ public class FileReceiver {
 		// Get checksum
 		long checksum = b.getLong();
 		
+		// Get the sequence number and number of data bytes
+		int seq = b.getInt();
+		int numOfDataBytes = b.getInt();
+		
 		// Calculate the checksum of the data in the packet
 		crc.reset();
 		crc.update(data, Long.BYTES, pathPacket.getLength() - Long.BYTES);
@@ -54,16 +58,15 @@ public class FileReceiver {
 		 * =====================================================
 		 */
 		
-		boolean isCorrupted = checksum != crc.getValue();
+		boolean isCorrupted = (checksum != crc.getValue()) || (seq != 0);
 		
 		if (isCorrupted) {
 			while (isCorrupted) {
 				// Send NAK
 				System.out.println("Packet corrupted, requesting resend.");
-				byte[] nakByte = new byte[1];
-				nakByte[0] = 0;
+				byte[] nakByte = "corrupted".getBytes();
 				DatagramPacket nak = new DatagramPacket(
-						nakByte, 0, 1, pathPacket.getSocketAddress());
+						nakByte, 0, nakByte.length, pathPacket.getSocketAddress());
 
 				socket.send(nak);
 
@@ -84,15 +87,14 @@ public class FileReceiver {
 				System.out.println("Received CRC:" + checksum + " Data:" + bytesToHex(data, pathPacket.getLength()));
 				
 				// Verify the packet again
-				isCorrupted = crc.getValue() != checksum;
+				isCorrupted = (checksum != crc.getValue()) || (seq != 0);
 				
 				// Send ACK if the packet has been verified and exit the loop
 				if (!isCorrupted) {
 					System.out.println("Packet verified.");
-					byte[] ackByte = new byte[1];
-					ackByte[0] = 1;
+					byte[] ackByte = "notCorrupted".getBytes();
 					DatagramPacket ack = new DatagramPacket(
-							ackByte, 0, 1, pathPacket.getSocketAddress());
+							ackByte, 0, ackByte.length, pathPacket.getSocketAddress());
 					
 					socket.send(ack);
 				}
@@ -101,18 +103,18 @@ public class FileReceiver {
 			// Send ACK if the packet has been verified
 			if (!isCorrupted) {
 				System.out.println("Packet verified.");
-				byte[] ackByte = new byte[1];
-				ackByte[0] = 1;
+				byte[] ackByte = "notCorrupted".getBytes();
 				DatagramPacket ack = new DatagramPacket(
-						ackByte, 0, 1, pathPacket.getSocketAddress());
+						ackByte, 0, ackByte.length, pathPacket.getSocketAddress());
 				
 				socket.send(ack);
 			}
 		}
 		
-		// Get the sequence number and number of data bytes
-		int seq = b.getInt();
-		int numOfDataBytes = b.getInt();
+		/*
+		 * Continue with the rest of the data
+		 * ====================================
+		 */
 		
 		// Get the filepath in bytes and convert to String
 		byte[] destBytes = new byte[numOfDataBytes];
@@ -128,19 +130,15 @@ public class FileReceiver {
 		
 		// Create a FileOutputStream to write the file
 		File file = new File(dest);
-		FileOutputStream fileOut;
-		
-		// Overwrite the file if it exists before program run
-		if (file.exists()) {
-			fileOut = new FileOutputStream(file);
-		} else {
-			fileOut = new FileOutputStream(file, true);
-		}
+		FileOutputStream fileOut = new FileOutputStream(file, true);
 		
 		// Create the data packet to receive into
 		data = new byte[1000];
 		b = ByteBuffer.wrap(data);
-		DatagramPacket dataPacket = new DatagramPacket(data, data.length);	
+		DatagramPacket dataPacket = new DatagramPacket(data, data.length);
+		
+		// Initialize a counter to check sequence number with
+		int packetIndex = 1;
 		
 		while(true) {
 			
@@ -164,32 +162,99 @@ public class FileReceiver {
 			numOfDataBytes = b.getInt();
 			
 			// Debug output
-			//System.out.println("Received CRC:" + crc.getValue() + " Data:" + bytesToHex(data, dataPacket.getLength()));
+			System.out.println("Received CRC:" + crc.getValue() + " Data:" + bytesToHex(data, dataPacket.getLength()));
 			
-			if (crc.getValue() != checksum) {
-				System.out.println("Packet corrupted");
-				
-				// If the packet is corrupt, request a resend
-				byte[] nakByte = new byte[1];
-				nakByte[0] = 0;
-				DatagramPacket nak = new DatagramPacket(
-						nakByte, 0, 1, dataPacket.getSocketAddress());
-				
-				socket.send(nak);
+			/*
+			 * Check if the packet is corrupted
+			 * ==================================
+			 */
+			
+			// Retransmissions occur when FileSender receives a garbled ACK/NAK from FileReceiver
+			boolean isRetransmission = (crc.getValue() == checksum) && seq == packetIndex - 1;
+			isCorrupted = (crc.getValue() != checksum) || (seq != packetIndex);
+			
+			if (isCorrupted) {
+				while (isCorrupted) {
+					// If it is a retransmission
+					if (isRetransmission) {
+						// Send FileSender an ACK response until it sends a new data packet
+						// (Send until the ACK gets through)
+						System.out.println("Packet is retransmission. Sending ACK.");
+						byte[] ackByte = "notCorrupted".getBytes();
+						DatagramPacket ack = new DatagramPacket(
+								ackByte, 0, ackByte.length, pathPacket.getSocketAddress());
+
+						socket.send(ack);
+					} else { // If the data is actually corrupt, not a retransmission
+						// Send NAK
+						System.out.println("Packet corrupted, requesting resend.");
+						byte[] nakByte = "corrupted".getBytes();
+						DatagramPacket nak = new DatagramPacket(
+								nakByte, 0, nakByte.length, dataPacket.getSocketAddress());
+
+						socket.send(nak);
+					}
+					
+					// Receive the packet again
+					data = new byte[1000];
+					b = ByteBuffer.wrap(data);
+					dataPacket = new DatagramPacket(data, data.length);
+					socket.receive(dataPacket);
+
+					checksum = b.getLong();
+
+					// Get the sequence number and number of data bytes
+					seq = b.getInt();
+					numOfDataBytes = b.getInt();
+
+					// Calculate the checksum of the data in the packet
+					crc.reset();
+					crc.update(data, Long.BYTES, dataPacket.getLength() - Long.BYTES);
+
+					// Debug message for data packet
+					System.out.println("Receiving data packet.");
+					System.out.println("Received CRC:" + checksum + " Data:" + bytesToHex(data, dataPacket.getLength()));
+
+					// Verify the packet again
+					isRetransmission = (crc.getValue() == checksum) && seq == packetIndex - 1;
+					isCorrupted = (crc.getValue() != checksum) || (seq != packetIndex);
+
+					// Send ACK if the packet has been verified and not a retransmission
+					if (!isCorrupted && !isRetransmission) {
+						System.out.println("Packet verified.");
+						byte[] ackByte = "notCorrupted".getBytes();
+						DatagramPacket ack = new DatagramPacket(
+								ackByte, 0, ackByte.length, pathPacket.getSocketAddress());
+
+						socket.send(ack);
+
+						// Write the data to file
+						byte[] readBytes = new byte[numOfDataBytes];
+						b.get(readBytes);
+						fileOut.write(readBytes);
+
+						// Increment the packet index
+						packetIndex++;
+					}
+				}
 			} else {
+				// Send ACK if the packet has been verified
+				if (!isCorrupted && !isRetransmission) {
+					System.out.println("Packet verified.");
+					byte[] ackByte = "notCorrupted".getBytes();
+					DatagramPacket ack = new DatagramPacket(
+							ackByte, 0, ackByte.length, pathPacket.getSocketAddress());
+					
+					socket.send(ack);
+				}
 				
-				// Create a byte[] to store the data
+				// Write the data to file
 				byte[] readBytes = new byte[numOfDataBytes];
 				b.get(readBytes);
-				
 				fileOut.write(readBytes);
 				
-				byte[] ackByte = new byte[1];
-				ackByte[0] = 1;
-				DatagramPacket ack = new DatagramPacket(
-						ackByte, 0, 1, dataPacket.getSocketAddress());
-				
-				socket.send(ack);
+				// Increment the packet index
+				packetIndex++;
 			}	
 		}
 	}
