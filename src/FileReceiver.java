@@ -18,6 +18,9 @@ public class FileReceiver {
 			System.exit(-1);
 		}
 		
+		// Declare the size of the packet buffer
+		int bufferSize = 1000;
+				
 		// Create a socket and set it to listen to a port
 		int port = Integer.parseInt(args[0]);
 		DatagramSocket socket = new DatagramSocket(port);
@@ -31,7 +34,7 @@ public class FileReceiver {
 		 */
 		
 		// Create the packet
-		byte[] data = new byte[1000];
+		byte[] data = new byte[bufferSize];
 		ByteBuffer b = ByteBuffer.wrap(data);
 		DatagramPacket pathPacket = new DatagramPacket(data, data.length);
 		
@@ -71,7 +74,7 @@ public class FileReceiver {
 				socket.send(nak);
 
 				// Receive packet again
-				data = new byte[1000];
+				data = new byte[bufferSize];
 				b = ByteBuffer.wrap(data);
 				pathPacket = new DatagramPacket(data, data.length);
 				socket.receive(pathPacket);
@@ -81,6 +84,10 @@ public class FileReceiver {
 				// Calculate the checksum of the data in the packet
 				crc.reset();
 				crc.update(data, Long.BYTES, pathPacket.getLength() - Long.BYTES);
+				
+				// Get the sequence number and number of data bytes
+				seq = b.getInt();
+				numOfDataBytes = b.getInt();
 
 				// Debug message for filepath packet
 				System.out.println("Receiving filepath packet.");
@@ -133,7 +140,7 @@ public class FileReceiver {
 		FileOutputStream fileOut = new FileOutputStream(file, true);
 		
 		// Create the data packet to receive into
-		data = new byte[1000];
+		data = new byte[bufferSize];
 		b = ByteBuffer.wrap(data);
 		DatagramPacket dataPacket = new DatagramPacket(data, data.length);
 		
@@ -179,7 +186,7 @@ public class FileReceiver {
 					if (isRetransmission) {
 						// Send FileSender an ACK response until it sends a new data packet
 						// (Send until the ACK gets through)
-						System.out.println("Packet is retransmission. Sending ACK.");
+						System.out.println("Retransmitted packet, resending ACK.");
 						byte[] ackByte = "notCorrupted".getBytes();
 						DatagramPacket ack = new DatagramPacket(
 								ackByte, 0, ackByte.length, pathPacket.getSocketAddress());
@@ -196,7 +203,7 @@ public class FileReceiver {
 					}
 					
 					// Receive the packet again
-					data = new byte[1000];
+					data = new byte[bufferSize];
 					b = ByteBuffer.wrap(data);
 					dataPacket = new DatagramPacket(data, data.length);
 					socket.receive(dataPacket);
